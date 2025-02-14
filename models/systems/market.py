@@ -1,7 +1,8 @@
-from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel
+
+from models.fleet.market_transaction import MarketTransaction
 
 
 class MarketItem(BaseModel):
@@ -10,23 +11,12 @@ class MarketItem(BaseModel):
     description: str
 
 
-class Transaction(BaseModel):
-    waypointSymbol: str
-    shipSymbol: str
-    tradeSymbol: str
-    type: str
-    units: int
-    pricePerUnit: int
-    totalPrice: int
-    timestamp: datetime
-
-
 class TradeGood(BaseModel):
     symbol: str
     type: str
     tradeVolume: int
     supply: str
-    activity: str = None
+    activity: Optional[str] = None
     purchasePrice: int
     sellPrice: int
 
@@ -36,5 +26,5 @@ class Market(BaseModel):
     exports: List[MarketItem]
     imports: List[MarketItem]
     exchange: List[MarketItem]
-    transactions: List[Transaction] = None
+    transactions: List[MarketTransaction] = None
     tradeGoods: List[TradeGood] = None

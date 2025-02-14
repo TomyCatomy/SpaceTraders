@@ -1,9 +1,9 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel
 
-from models.systems.waypoint import Waypoint
+from models.fleet.ship_nav import ShipNav
 
 
 class ShipRegistration(BaseModel):
@@ -12,42 +12,27 @@ class ShipRegistration(BaseModel):
     role: str
 
 
-class ShipRoute(BaseModel):
-    destination: Waypoint
-    origin: Waypoint
-    departureTime: datetime
-    arrival: datetime
-
-
-class ShipNav(BaseModel):
-    systemSymbol: str
-    waypointSymbol: str
-    route: ShipRoute
-    status: str
-    flightMode: str
-
-
 class ShipCrew(BaseModel):
-    current: int
-    required: int
     capacity: int
-    rotation: str
-    morale: int
-    wages: int
+    required: int
+    current: Optional[int] = None
+    rotation: Optional[str] = None
+    morale: Optional[int] = None
+    wages: Optional[int] = None
 
 
 class Requirements(BaseModel):
-    power: int = None
-    crew: int = None
-    slots: int = None
+    power: Optional[int] = None
+    crew: Optional[int] = None
+    slots: Optional[int] = None
 
 
 class ShipFrame(BaseModel):
     symbol: str
     name: str
     description: str
-    condition: int
-    integrity: int
+    condition: float
+    integrity: float
     moduleSlots: int
     mountingPoints: int
     fuelCapacity: int
@@ -58,8 +43,8 @@ class ShipReactor(BaseModel):
     symbol: str
     name: str
     description: str
-    condition: int
-    integrity: int
+    condition: float
+    integrity: float
     powerOutput: int
     requirements: Requirements
 
@@ -68,23 +53,23 @@ class ShipEngine(BaseModel):
     symbol: str
     name: str
     description: str
-    condition: int
-    integrity: int
+    condition: float
+    integrity: float
     speed: int
     requirements: Requirements
 
 
-class ShipCooldown(BaseModel):
+class Cooldown(BaseModel):
     shipSymbol: str
     totalSeconds: int
     remainingSeconds: int
-    expiration: datetime = None
+    expiration: Optional[datetime] = None
 
 
 class ShipModule(BaseModel):
     symbol: str
-    capacity: int = None
-    range: int = None
+    capacity: Optional[int] = None
+    range: Optional[int] = None
     name: str
     description: str
     requirements: Requirements
@@ -93,9 +78,9 @@ class ShipModule(BaseModel):
 class Mount(BaseModel):
     symbol: str
     name: str
-    description: str = None
-    strength: int = None
-    deposits: List[str] = None
+    description: Optional[str] = None
+    strength: Optional[int] = None
+    deposits: Optional[List[str]] = None
     requirements: Requirements
 
 
@@ -131,7 +116,7 @@ class Ship(BaseModel):
     frame: ShipFrame
     reactor: ShipReactor
     engine: ShipEngine
-    cooldown: ShipCooldown
+    cooldown: Cooldown
     modules: List[ShipModule]
     mounts: List[Mount]
     cargo: ShipCargo

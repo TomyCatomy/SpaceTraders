@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional, Hashable
 
 from pydantic import BaseModel
 
@@ -25,21 +25,24 @@ class WaypointModifier(BaseModel):
 
 
 class WaypointChart(BaseModel):
-    waypointSymbol: str = None
+    waypointSymbol: Optional[str] = None
     submittedBy: str
     submittedOn: datetime
 
 
-class Waypoint(BaseModel):
+class Waypoint(BaseModel, Hashable):
     symbol: str
     type: str
-    systemSymbol: str = None
+    systemSymbol: Optional[str] = None
     x: int
     y: int
     orbitals: List[WaypointOrbital] = None
-    orbits: str = None
+    orbits: Optional[str] = None
     faction: WaypointFaction = None
     traits: List[WaypointTrait] = None
     modifiers: List[WaypointModifier] = None
     chart: WaypointChart = None
     isUnderConstruction: bool = None
+
+    def __hash__(self):
+        return hash(self.symbol)

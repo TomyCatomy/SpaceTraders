@@ -1,11 +1,11 @@
 from datetime import datetime
-from typing import Type, TypeVar, Tuple, List, Dict
+from typing import Type, TypeVar, Tuple, List, Dict, Optional, Any
 
 import httpx_auth
 from httpx import Response, AsyncClient
 from pydantic import BaseModel, RootModel
 
-from models.data import Data
+from models.base_space_traders_response import BaseSpaceTradersResponse
 from models.meta import Meta
 
 
@@ -18,21 +18,32 @@ class InternalClient:
         self._client = client
         self._next_request = datetime.min
 
-    def set_auth_token(self, token: str):
-        self._client.auth = httpx_auth.HeaderApiKey(f"Bearer {token}", "Authorization")
+    def set_auth_token(self, token: Optional[str]):
+        if token is None:
+            self._client.auth = None
+        else:
+            self._client.auth = httpx_auth.HeaderApiKey(f"Bearer {token}", "Authorization")
 
     async def post_data(self, response_type: Type[T], url: str, req_data: BaseModel) -> T:
-        req_content: Data = Data(data=req_data)
+        req_content: BaseSpaceTradersResponse = BaseSpaceTradersResponse(data=req_data)
         return await self.post(response_type, url, req_content)
 
-    async def post(self, response_type: Type[T], url: str, req_data: BaseModel) -> T:
-        req_json = req_data.model_dump_json(exclude_none=True)
+    async def post(self, response_type: Type[T], url: str, req_data: Optional[BaseModel]=None) -> T:
+        req_json: Optional[Dict[str, Any]] = None
+        if req_data is not None:
+            req_json = req_data.model_dump(exclude_none=True)
+
         response: Response = await self._client.post(url=url, json=req_json)
+        return InternalClient._extract_data_from_response(response_type, response)
+
+    async def get_data(self, response_type: Type[T], url: str, params: Dict[str, str] = None) -> T:
+        response: Response = await self._client.get(url=url, params=params)
         return InternalClient._extract_data_from_response(response_type, response)
 
     async def get(self, response_type: Type[T], url: str, params: Dict[str, str] = None) -> T:
         response: Response = await self._client.get(url=url, params=params)
         return InternalClient._extract_data_from_response(response_type, response)
+
 
     async def get_paginated_list(self, response_item_type: Type[T], url: str,
                                  params: Dict[str, str] = None, max_count: int = -1) -> List[T]:
@@ -46,7 +57,7 @@ class InternalClient:
         next_page = 2
         while len(item_list) < count:
             params = {"page": str(next_page)}
-            page = await self.get(response_type, url, params)
+            page = await self.get_data(response_type, url, params)
             item_list.extend(page.root)
             next_page += 1
 
@@ -67,7 +78,7 @@ class InternalClient:
     def _extract_data_and_meta_from_response(response_type: Type[T], response: Response) -> Tuple[T, Meta]:
         response.raise_for_status()
         response_json: str = response.json()
-        response_content: Data = Data.model_validate(response_json)
+        response_content = BaseSpaceTradersResponse.model_validate(response_json)
         return response_type.model_validate(response_content.data), response_content.meta
 
     @staticmethod

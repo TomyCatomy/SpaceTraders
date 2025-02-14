@@ -18,5 +18,5 @@ class Agent:
         return response
 
     async def get_my_agent(self) -> models.agents.agent.Agent:
-        response = await self._client.get(response_type=models.agents.agent.Agent, url="/my/agent")
+        response = await self._client.get_data(response_type=models.agents.agent.Agent, url="/my/agent")
         return response
