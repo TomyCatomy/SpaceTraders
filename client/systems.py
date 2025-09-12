@@ -30,7 +30,10 @@ class Systems:
             params = f"type{waypoint_type}"
 
         if waypoint_traits is not None and len(waypoint_traits) > 0:
-            params += f"&traits={"&traits=".join(waypoint_traits)}"
+            if params != "":
+                params += "&"
+
+            params += f"traits={"&traits=".join(waypoint_traits)}"
 
         waypoints: List[Waypoint] = await self._client.get_paginated_list(
             response_item_type=Waypoint,

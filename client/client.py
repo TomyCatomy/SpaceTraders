@@ -3,7 +3,6 @@ import string
 from typing import Optional, Tuple
 
 import httpx
-import httpx_auth
 from httpx import AsyncClient, HTTPStatusError, Limits
 
 from client.agent import Agent

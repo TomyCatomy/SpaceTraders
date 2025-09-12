@@ -3,56 +3,246 @@ import math
 import os.path
 from asyncio import sleep
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional, Set, Tuple
 
 import dotenv
+from httpx import HTTPStatusError
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo import IndexModel
 
+from Scripts.mongodb_utils import (upsert_one_to_unique_object_collection, get_unique_object_if_inserted,
+                                   get_objects_from_system)
 from client.client import Client
-from models.contracts.contract import Contract
+from models.contracts.contract import Contract, ContractOrder
 from models.contracts.requests.deliver_cargo_to_contract_req import DeliverCargoToContractReq
 from models.fleet.requests.jettison_cargo_req import JettisonCargoReq
 from models.fleet.requests.navigate_ship_req import NavigateShipReq
+from models.fleet.requests.purchase_cargo_req import PurchaseCargoReq
 from models.fleet.requests.purchase_ship_req import PurchaseShipReq
-from models.fleet.ship import Ship
+from models.fleet.requests.refuel_req import RefuelReq
+from models.fleet.ship import Ship, ShipInventoryItem
 from models.fleet.ship_nav import ShipNav
 from models.systems.market import Market
 from models.systems.shipyard import Shipyard
 from models.systems.waypoint import Waypoint
 
+FUEL = "FUEL"
+
+FUEL_STATION = "FUEL_STATION"
+
+SHIP_SURVEYOR = "SHIP_SURVEYOR"
+
+SURVEYOR = "SURVEYOR"
+
+SHIPYARD = "SHIPYARD"
+
+EXCAVATOR = "EXCAVATOR"
+
+COMMAND_SHIP_TYPE = "COMMAND"
+
+SATELLITE_SHIP_TYPE = "SATELLITE"
+
+SHIPYARDS_MONGO_COLLECTION = "SHIPYARDS"
+
+COMMON_METAL_DEPOSITS = "COMMON_METAL_DEPOSITS"
+
+MARKETPLACE = "MARKETPLACE"
+DOCKED = "DOCKED"
+SHIP_MINING_DRONE_SHIP_TYPE = "SHIP_MINING_DRONE"
+IN_TRANSIT = "IN_TRANSIT"
+MAX_DISTANCE_PER_FUEL_UNIT = 1
+
+
+def time_left_in_seconds(target_time: datetime) -> float:
+    return (target_time - datetime.now(tz=timezone.utc)).total_seconds()
+
+
 async def sleep_until_arrival(nav: ShipNav):
-    seconds_to_arrival = (nav.route.arrival - datetime.now(tz=timezone.utc)).total_seconds()
+    seconds_to_arrival = time_left_in_seconds(nav.route.arrival)
     print(f"Sleeping {seconds_to_arrival} seconds for ship to arrive")
     await sleep(seconds_to_arrival)
 
 
 async def navigate_ship(client: Client, ship_symbol: str, dest_waypoint_symbol: str) -> None:
     ship = await client.fleet.get_ship(ship_symbol)
+    if ship.nav.status == IN_TRANSIT:
+        await sleep_until_arrival(ship.nav)
 
+    ship = await client.fleet.get_ship(ship_symbol)
     if ship.nav.waypointSymbol == dest_waypoint_symbol:
         return
 
-    if ship.nav.status == "IN_TRANSIT":
-        if ship.nav.route.origin.symbol == ship.nav.route.destination.symbol == dest_waypoint_symbol:
-            return
-        await sleep_until_arrival(ship.nav)
-
-    if ship.nav.status != "DOCKED":
-        await client.fleet.dock_ship(ship_symbol)
-
-    await client.fleet.refuel_ship(ship_symbol)
-    await client.fleet.orbit_ship(ship_symbol)
+    await prep_ship(client, ship)
     result = await client.fleet.navigate_ship(ship_symbol, NavigateShipReq(waypointSymbol=dest_waypoint_symbol))
     await sleep_until_arrival(result.nav)
 
 
+async def voyage_ship(client: Client, ship_symbol: str, dest_waypoint: Waypoint) -> None:
+    ship = await client.fleet.get_ship(ship_symbol)
+    system_symbol = dest_waypoint.systemSymbol
+    fuel_stations = await get_system_fuel_stations(client, system_symbol)
+    waypoints = await get_system_waypoints(client, system_symbol)
+    if ship.nav.status == IN_TRANSIT:
+        await sleep_until_arrival(ship.nav)
+
+    ship = await client.fleet.get_ship(ship_symbol)
+    max_hop_distance = ship.fuel.capacity * MAX_DISTANCE_PER_FUEL_UNIT
+    origin_waypoint = ship.nav.route.origin
+    if origin_waypoint.systemSymbol != dest_waypoint.systemSymbol:
+        raise Exception("Inter-system voyages currently not supported")
+
+    fuel_units_in_cargo = get_fuel_units_in_cargo(ship)
+    max_fuel_units_in_cargo = ship.cargo.capacity - ship.cargo.units + fuel_units_in_cargo
+    route = find_voyage_route(
+        origin_waypoint,
+        dest_waypoint,
+        fuel_stations,
+        waypoints,
+        max_hop_distance,
+        fuel_units_in_cargo,
+        max_fuel_units_in_cargo
+    )
+    for waypoint in route:
+        await navigate_ship(client, ship_symbol, waypoint.symbol)
+
+
+def get_fuel_units_in_cargo(ship: Ship):
+    fuel_units_in_cargo = [item.units for item in ship.cargo.inventory if item.symbol == FUEL]
+    if len(fuel_units_in_cargo) == 0:
+        return 0
+
+    return fuel_units_in_cargo[0]
+
+
+def find_voyage_route(
+        origin_waypoint: Waypoint,
+        dest_waypoint: Waypoint,
+        fuel_stations: List[Waypoint],
+        waypoints: List[Waypoint],
+        max_hop_distance: int,
+        initial_max_hops_between_fuel_stations: int,
+        max_hops_between_fuel_stations: int
+) -> List[Waypoint]:
+    in_range_fuel_stations = list(filter(
+        lambda fuel_station: distance_between(origin_waypoint, fuel_station) <= distance_between(origin_waypoint, dest_waypoint) * 0.7,
+        fuel_stations
+    ))
+    sorted_fuel_stations = sort_waypoints_by_distance(dest_waypoint, in_range_fuel_stations)
+    route_to_fuel_station = find_remainder_of_voyage_route(
+        [origin_waypoint],
+        sorted_fuel_stations[0],
+        waypoints,
+        max_hop_distance,
+        initial_max_hops_between_fuel_stations
+    )
+    route_to_dest = find_remainder_of_voyage_route(
+        [sorted_fuel_stations[0]],
+        dest_waypoint,
+        waypoints,
+        max_hop_distance,
+        max_hops_between_fuel_stations
+    )
+    route = route_to_fuel_station
+    route.extend(route_to_dest[1:])
+    return route
+
+
+def find_remainder_of_voyage_route(
+        waypoint_route: List[Waypoint],
+        dest_waypoint: Waypoint,
+        waypoints: List[Waypoint],
+        max_hop_distance: int,
+        max_hops_between_fuel_stations: int
+) -> List[Waypoint]:
+    if distance_between(waypoint_route[-1], dest_waypoint) < max_hop_distance:
+        if max_hops_between_fuel_stations < len(waypoint_route) - 1:
+            raise Exception("Unable to launch voyage - too many hops")
+
+        waypoint_route.append(dest_waypoint)
+        return waypoint_route
+
+    in_range_waypoints = list(filter(
+        lambda waypoint: distance_between(waypoint_route[-1], waypoint) <= max_hop_distance,
+        waypoints
+    ))
+    sorted_waypoints = sort_waypoints_by_distance(dest_waypoint, in_range_waypoints)
+    for next_hop_option in sorted_waypoints:
+        if (next_hop_option.x, next_hop_option.y) in [(waypoint.x, waypoint.y) for waypoint in waypoint_route]:
+            continue
+
+        option_route = waypoint_route.copy()
+        option_route.append(next_hop_option)
+        result_route = find_remainder_of_voyage_route(
+            option_route,
+            dest_waypoint,
+            waypoints,
+            max_hop_distance,
+            max_hops_between_fuel_stations
+        )
+        if result_route[-1] == dest_waypoint:
+            return result_route
+
+    return waypoint_route
+
+
+
+async def prep_ship(client: Client, ship: Ship) -> None:
+    if ship.nav.status != DOCKED:
+        await client.fleet.dock_ship(ship.symbol)
+
+    current_waypoint = ship.nav.route.origin
+    refuel_from_cargo = True
+    if MARKETPLACE in [trait.symbol for trait in current_waypoint.traits]:
+        marketplace = await client.systems.get_market(current_waypoint.systemSymbol, current_waypoint.symbol)
+        if FUEL in [good.symbol for good in marketplace.tradeGoods]:
+            refuel_from_cargo = False
+            await client.fleet.purchase_cargo(
+                ship.symbol,
+                PurchaseCargoReq(symbol=FUEL, units=ship.cargo.capacity - ship.cargo.units))
+
+    if refuel_from_cargo or FUEL in [item.symbol for item in ship.cargo.inventory]:
+        refuel_amount = int(math.ceil(ship.fuel.capacity - ship.fuel.current) / 100)
+        if refuel_from_cargo:
+            fuel_units_in_cargo = get_fuel_units_in_cargo(ship)
+            refuel_amount = min([refuel_amount, fuel_units_in_cargo])
+
+        await client.fleet.refuel_ship(ship.symbol, RefuelReq(units=refuel_amount, fromCargo=refuel_from_cargo))
+
+    await client.fleet.orbit_ship(ship.symbol)
+
+
 async def get_system_markets(client: Client, system_symbol: str):
-    waypoints: List[Waypoint] = await client.systems.list_waypoints(system_symbol, waypoint_traits=["MARKETPLACE"])
+    waypoints: List[Waypoint] = await client.systems.list_waypoints(
+        system_symbol,
+        waypoint_traits=[MARKETPLACE],
+        count=1000
+    )
     markets: List[Market] = []
     for waypoint in waypoints:
+        if MARKETPLACE not in [trait.symbol for trait in waypoint.traits]:
+            continue
+
         market: Market = await client.systems.get_market(system_symbol, waypoint.symbol)
         markets.append(market)
 
     return markets
+
+
+async def get_system_fuel_stations(client: Client, system_symbol: str):
+    waypoints: List[Waypoint] = await client.systems.list_waypoints(
+        system_symbol,
+        waypoint_type=FUEL_STATION,
+        count=1000
+    )
+    return waypoints
+
+
+async def get_system_waypoints(client: Client, system_symbol: str):
+    waypoints: List[Waypoint] = await client.systems.list_waypoints(
+        system_symbol,
+        count=1000
+    )
+    return waypoints
 
 
 def distance_between(waypoint1: Waypoint, waypoint2: Waypoint) -> float:
@@ -61,14 +251,20 @@ def distance_between(waypoint1: Waypoint, waypoint2: Waypoint) -> float:
     return math.sqrt(x_delta ** 2 + y_delta ** 2)
 
 
-def sort_waypoints_by_distance(reference_waypoint: Waypoint, waypoint_list: List[Waypoint]) -> None:
-    waypoint_list.sort(key=lambda waypoint: distance_between(reference_waypoint, waypoint))
+def sort_waypoints_by_distance(reference_waypoint: Waypoint, waypoint_list: List[Waypoint]) -> List[Waypoint]:
+    sorted_waypoint_list = waypoint_list.copy()
+    sorted_waypoint_list.sort(key=lambda waypoint: distance_between(reference_waypoint, waypoint))
+    return sorted_waypoint_list
 
 
 async def get_extraction_waypoint(client: Client, ship: Ship) -> Waypoint:
-    waypoints = await client.systems.list_waypoints(ship.nav.systemSymbol, waypoint_traits=["COMMON_METAL_DEPOSITS"])
-    sort_waypoints_by_distance(ship.nav.route.origin, waypoints)
-    return waypoints[0]
+    waypoints = await client.systems.list_waypoints(ship.nav.systemSymbol, waypoint_traits=[COMMON_METAL_DEPOSITS])
+    non_stripped_waypoints = [
+        waypoint for waypoint in waypoints
+        if "STRIPPED" not in [trait.symbol for trait in waypoint.traits]
+    ]
+    sorted_waypoints = sort_waypoints_by_distance(ship.nav.route.origin, non_stripped_waypoints)
+    return sorted_waypoints[0]
 
 
 async def ship_cargo_is_full(client: Client, ship_symbol: str) -> bool:
@@ -78,16 +274,32 @@ async def ship_cargo_is_full(client: Client, ship_symbol: str) -> bool:
 
 async def extract_until_resource_full(client: Client, extractor_symbol: str, resource_symbols: List[str]) -> None:
     while not await ship_cargo_is_full(client=client, ship_symbol=extractor_symbol):
+        extractor = await client.fleet.get_ship(extractor_symbol)
+        print(f"Extractor cargo before extraction: {extractor.cargo}")
+        await sleep_for_cooldown(extractor)
         response = await client.fleet.extract_resources(extractor_symbol)
+        print(f"Extracted the following: {response.extraction.extraction_yield}")
         await jettison_redundant_resources(
             client=client,
             ship_symbol=extractor_symbol,
             necessary_resource_symbols=resource_symbols
         )
-        await asyncio.sleep(response.cooldown.remainingSeconds)
 
 
-async def jettison_redundant_resources(client: Client, ship_symbol: str, necessary_resource_symbols: List[str]) -> None:
+async def sleep_for_cooldown(extractor) -> None:
+    if not extractor.cooldown.expiration:
+        return
+
+    remaining_seconds = time_left_in_seconds(extractor.cooldown.expiration)
+    print(f"Waiting for cooldown for {remaining_seconds} seconds")
+    await asyncio.sleep(remaining_seconds)
+
+
+async def jettison_redundant_resources(
+        client: Client,
+        ship_symbol: str,
+        necessary_resource_symbols: List[str]
+) -> None:
     ship = await client.fleet.get_ship(ship_symbol=ship_symbol)
     for resource in ship.cargo.inventory:
         if resource.symbol not in necessary_resource_symbols:
@@ -97,105 +309,267 @@ async def jettison_redundant_resources(client: Client, ship_symbol: str, necessa
             )
 
 
+def get_system_symbol(waypoint_symbol: str) -> str:
+    return "-".join(waypoint_symbol.split("-")[:2])
+
+
 async def get_waypoint(client: Client, waypoint_symbol: str) -> Waypoint:
-    return await client.systems.get_waypoint(waypoint_symbol[:6], waypoint_symbol)
+    return await client.systems.get_waypoint(get_system_symbol(waypoint_symbol), waypoint_symbol)
 
 
-async def get_shipyard(client: Client, waypoint_symbol: str) -> Shipyard:
-    return await client.systems.get_shipyard(waypoint_symbol[:6], waypoint_symbol)
+async def get_shipyard(client: Client, waypoint_symbol: str, mongodb_database: AsyncIOMotorDatabase) -> Shipyard:
+    collection = mongodb_database[SHIPYARDS_MONGO_COLLECTION]
+    shipyard = await client.systems.get_shipyard(get_system_symbol(waypoint_symbol), waypoint_symbol)
+    await upsert_one_to_unique_object_collection(collection=collection, document=shipyard)
+    return shipyard
 
 
-async def buy_extractor(client: Client, system_symbol: str) -> Ship:
-    shipyards = await client.systems.list_waypoints(system_symbol=system_symbol, waypoint_traits=["SHIPYARD"])
+async def buy_ship_if_available(
+        client: Client,
+        shipyard_symbol: str,
+        ship_type: str,
+        mongodb_database: AsyncIOMotorDatabase
+) -> Optional[Ship]:
+    shipyard = await get_shipyard(client, shipyard_symbol, mongodb_database)
+    if ship_type in shipyard.shipTypes:
+        response = await client.fleet.purchase_ship(
+            PurchaseShipReq(shipType=ship_type, waypointSymbol=shipyard_symbol)
+        )
+        return response.ship
+
+
+async def get_explored_shipyard_with_ship_type_if_exists(
+        required_ship_type: str,
+        system_symbol: str,
+        database: AsyncIOMotorDatabase
+) -> Optional[Shipyard]:
+    explored_shipyards = await get_objects_from_system(Shipyard, database[SHIPYARDS_MONGO_COLLECTION], system_symbol)
+    relevant_shipyards = [
+        shipyard for shipyard in explored_shipyards
+        if required_ship_type in [ship_type.type for ship_type in shipyard.shipTypes]
+    ]
+    return relevant_shipyards[0]
+
+
+async def buy_ship(client: Client, system_symbol: str, ship_type: str, mongodb_database: AsyncIOMotorDatabase) -> Ship:
+    collection = mongodb_database[SHIPYARDS_MONGO_COLLECTION]
+    shipyards = await client.systems.list_waypoints(
+        system_symbol=system_symbol,
+        waypoint_traits=[SHIPYARD]
+    )
     ships = await client.fleet.get_ships()
+
+    for ship in ships:
+        if ship.nav.status == IN_TRANSIT:
+            continue
+
+        if ship.nav.waypointSymbol in [shipyard.symbol for shipyard in shipyards]:
+            bought_ship = await buy_ship_if_available(
+                client,
+                ship.nav.waypointSymbol,
+                ship_type,
+                mongodb_database
+            )
+            if bought_ship:
+                return bought_ship
+
+    probe = [ship for ship in ships if ship.registration.role == SATELLITE_SHIP_TYPE][0]
+    known_extractor_seller = await get_explored_shipyard_with_ship_type_if_exists(
+        ship_type,
+        system_symbol,
+        mongodb_database
+    )
+    if known_extractor_seller:
+        extractor_seller_waypoint = await client.systems.get_waypoint(system_symbol, known_extractor_seller.symbol)
+        await voyage_ship(client=client, ship_symbol=probe.symbol, dest_waypoint=extractor_seller_waypoint)
+        result = await client.fleet.purchase_ship(PurchaseShipReq(
+            shipType=ship_type,
+            waypointSymbol=known_extractor_seller.symbol)
+        )
+        return result.ship
+
     for shipyard in shipyards:
-        if len([ship for ship in ships if ship.nav.waypointSymbol == shipyards[0]]) == 0:
-            probe = [ship for ship in ships if ship.registration.role == "SATELLITE"][0]
-            await navigate_ship(client=client, ship_symbol=probe.symbol, dest_waypoint_symbol=shipyard.symbol)
-            extended_shipyard = await get_shipyard(client, shipyard.symbol)
-            if "SHIP_MINING_DRONE" in [ship_type.type for ship_type in extended_shipyard.shipTypes]:
-                response = await client.fleet.purchase_ship(
-                    purchase_req=PurchaseShipReq(shipType="SHIP_MINING_DRONE", waypointSymbol=shipyard.symbol)
-                )
-                return response.ship
+        known_shipyard_data = await get_unique_object_if_inserted(Shipyard, collection, shipyard.symbol)
+        if known_shipyard_data:
+            continue
+
+        if shipyard.symbol not in [ship.nav.waypointSymbol for ship in ships]:
+            extractor_seller_waypoint = await client.systems.get_waypoint(system_symbol, known_extractor_seller.symbol)
+            await voyage_ship(client=client, ship_symbol=probe.symbol, dest_waypoint=extractor_seller_waypoint)
+
+        extractor = await buy_ship_if_available(client, shipyard.symbol, ship_type, mongodb_database)
+        if extractor:
+            return extractor
+
+    raise Exception("Couldn't find suitable extractor")
 
 
-async def get_contract(client: Client) -> Contract:
-    contracts = await client.contracts.get_contract_list()
-    if len(contracts) > 0:
-        contract = contracts[0]
-    else:
-        ships = await client.fleet.get_ships()
-        command_ship = [ship for ship in ships if ship.registration.role == "COMMAND"][0]
-        contract = (await client.fleet.negotiate_contract(command_ship.symbol)).contract
+async def get_accepted_contract(client: Client) -> Contract:
+    contract = await get_contract(client)
 
     if not contract.accepted:
-        return await client.contracts.accept_contract(contract.id)
+        return (await client.contracts.accept_contract(contract.id)).contract
 
     return contract
 
 
-async def basic_automation_cycle():
-    symbol = dotenv.get_key(os.path.join("..", ".env"), "USER")
-    agent_token = dotenv.get_key(os.path.join("..", ".env"), "TOKEN")
-    account_token = dotenv.get_key(os.path.join("..", ".env"), "ACCOUNT_TOKEN")
-    client, agent_token = await Client.get_client(
+async def get_contract(client: Client):
+    contracts = await client.contracts.get_contract_list()
+    if len(contracts) > 0:
+        return contracts[0]
+
+    return await acquire_contract(client)
+
+
+async def acquire_contract(client: Client):
+    ships = await client.fleet.get_ships()
+    command_ship = [ship for ship in ships if ship.registration.role == COMMAND_SHIP_TYPE][0]
+    contract = (await client.fleet.negotiate_contract(command_ship.symbol)).contract
+    return contract
+
+
+async def database_setup(mongodb_client: AsyncIOMotorClient, agent_symbol: str):
+    database_names = await mongodb_client.list_database_names()
+    if agent_symbol in database_names:
+        return mongodb_client[agent_symbol]
+    return await create_database(mongodb_client, agent_symbol)
+
+
+async def create_database(mongodb_client: AsyncIOMotorClient, agent_symbol: str):
+    database = mongodb_client[agent_symbol]
+    symbol_index_collections = [
+        database["SYSTEMS"],
+        database["WAYPOINTS"],
+        database["MARKETS"],
+        database["SHIPYARDS"],
+        database["SURVEYS"]
+    ]
+    for collection in symbol_index_collections:
+        await collection.create_index("symbol")
+
+    await database["SURVEYS"].create_indexes([IndexModel("signature"), IndexModel("expiration")])
+    return database
+
+
+async def get_ship(client: Client, ship_role: str, ship_type: str, database: AsyncIOMotorDatabase) -> Ship:
+    ships: List[Ship] = await client.fleet.get_ships()
+    extractors = [ship for ship in ships if ship.registration.role == ship_role]
+    if len(extractors) == 0:
+        return await buy_ship(client, ships[0].nav.systemSymbol, ship_type, database)
+    else:
+        return extractors[0]
+
+
+async def deposit_contract_resources(client: Client, contract_id: str, extractor_symbol: str):
+    contract = await client.contracts.get_contract(contract_id)
+    uncompleted_order_waypoints = {
+        await get_waypoint(client, order.destinationSymbol) for order in contract.terms.deliver
+        if order.unitsRequired > order.unitsFulfilled
+    }
+    while len(uncompleted_order_waypoints) > 0:
+        extractor = await client.fleet.get_ship(extractor_symbol)
+        if extractor.cargo.units == 0:
+            return uncompleted_order_waypoints
+
+        uncompleted_order_waypoints = await deposit_contract_resources_in_planet(
+            client,
+            contract,
+            extractor.symbol,
+            uncompleted_order_waypoints
+        )
+
+
+async def deposit_contract_resources_in_planet(
+        client: Client,
+        contract: Contract,
+        extractor_symbol: str,
+        uncompleted_order_waypoints: Set[Waypoint]
+) -> Set[Waypoint]:
+    uncompleted_order_waypoints = uncompleted_order_waypoints.copy()
+    extractor = await client.fleet.get_ship(extractor_symbol)
+    current_waypoint = await voyage_to_closest_waypoint(client, extractor, list(uncompleted_order_waypoints))
+    for order in contract.terms.deliver:
+        if order.destinationSymbol == current_waypoint.symbol and order.unitsRequired > order.unitsFulfilled:
+            await deliver_cargo_to_order_if_possible(client, contract, extractor, order)
+
+    uncompleted_order_waypoints.remove(current_waypoint)
+    return uncompleted_order_waypoints
+
+
+async def voyage_to_closest_waypoint(client: Client, ship: Ship, waypoints: List[Waypoint]):
+    closest_waypoint = await get_closest_waypoint(ship.nav.route.origin, waypoints)
+    await voyage_ship(client=client, ship_symbol=ship.symbol, dest_waypoint=closest_waypoint)
+    current_waypoint = closest_waypoint
+    return current_waypoint
+
+
+async def get_closest_waypoint(reference_waypoint: Waypoint, uncompleted_order_waypoints: List[Waypoint]) -> Waypoint:
+    sorted_order_waypoints = sort_waypoints_by_distance(reference_waypoint, list(uncompleted_order_waypoints))
+    closest_waypoint = sorted_order_waypoints[0]
+    return closest_waypoint
+
+
+async def deliver_cargo_to_order_if_possible(
+        client: Client,
+        contract: Contract,
+        extractor: Ship,
+        order: ContractOrder
+) -> None:
+    relevant_inventory_item_if_exists = [item for item in extractor.cargo.inventory if item.symbol == order.tradeSymbol]
+    if len(relevant_inventory_item_if_exists) == 1:
+        await deliver_cargo_to_order(client, contract, extractor, order, relevant_inventory_item_if_exists[0])
+
+
+async def deliver_cargo_to_order(
+        client: Client,
+        contract: Contract,
+        ship: Ship,
+        order: ContractOrder,
+        relevant_inventory_item: ShipInventoryItem):
+    deliver_cargo_req_body = DeliverCargoToContractReq(
+        shipSymbol=ship.symbol,
+        tradeSymbol=order.tradeSymbol,
+        units=min([ order.unitsRequired - order.unitsFulfilled, relevant_inventory_item.units ])
+    )
+    await client.fleet.dock_ship(ship.symbol)
+    await client.contracts.deliver_cargo_to_contract(contract.id, deliver_cargo_req_body)
+
+
+async def basic_automation_cycle(dotenv_file_path: str):
+    agent_symbol = dotenv.get_key(dotenv_file_path, "USER")
+    agent_token = dotenv.get_key(dotenv_file_path, "TOKEN")
+    account_token = dotenv.get_key(dotenv_file_path, "ACCOUNT_TOKEN")
+    mongodb_connection_string = dotenv.get_key(dotenv_file_path, "MONGODB_CONNECTION_STRING")
+    client, new_agent_token = await Client.get_client(
         agent_auth_token=agent_token,
         account_auth_token=account_token,
-        agent_symbol=symbol
+        agent_symbol=agent_symbol
     )
-    dotenv.set_key(os.path.join("..", ".env"), "TOKEN", agent_token)
-    contract = await get_contract(client)
+    dotenv.set_key(dotenv_file_path, "TOKEN", new_agent_token)
+
+    mongodb_client = AsyncIOMotorClient(host=mongodb_connection_string)
+    database = await database_setup(mongodb_client, agent_symbol)
+
+    contract = await get_accepted_contract(client)
+    system_symbol = get_system_symbol(contract.terms.deliver[0].destinationSymbol)
+    fuel_stations = await get_system_fuel_stations(client, system_symbol)
+    # surveyor = await get_ship(client, SURVEYOR, SHIP_SURVEYOR, database)
+    extractor = await get_ship(client, EXCAVATOR, SHIP_MINING_DRONE_SHIP_TYPE, database)
+    await deposit_contract_resources(client, contract.id, extractor.symbol)
     necessary_resources = {
         order.tradeSymbol for order in contract.terms.deliver
         if order.unitsRequired > order.unitsFulfilled
     }
-    incomplete_order_waypoints = {
-        await get_waypoint(client, order.destinationSymbol) for order in contract.terms.deliver
-        if order.unitsRequired > order.unitsFulfilled
-    }
-    ships: List[Ship] = await client.fleet.get_ships()
-    extractors = [ship for ship in ships if ship.registration.role == "EXTRACTOR"]
-    if len(extractors) == 0:
-        extractor = await buy_extractor(client, ships[0].nav.systemSymbol)
-    else:
-        extractor = extractors[0]
 
     extraction_astroid: Waypoint = await get_extraction_waypoint(client, extractor)
-    await navigate_ship(client, extractor.symbol, extraction_astroid.symbol)
+    await voyage_ship(client, extractor.symbol, extraction_astroid)
     await extract_until_resource_full(
         client=client,
         extractor_symbol=extractor.symbol,
         resource_symbols=list(necessary_resources)
     )
-    while len(incomplete_order_waypoints) > 0:
-        extractor = await client.fleet.get_ship(extractor.symbol)
-        distance_sorted_incomplete_order_waypoints = list(incomplete_order_waypoints)
-        sort_waypoints_by_distance(extractor.nav.route.origin, distance_sorted_incomplete_order_waypoints)
-        closest_waypoint = distance_sorted_incomplete_order_waypoints[0]
-        await navigate_ship(client=client, ship_symbol=extractor.symbol, dest_waypoint_symbol=closest_waypoint)
-        current_waypoint = closest_waypoint
-        for order in contract.terms.deliver:
-            if order.destinationSymbol == current_waypoint and order.unitsRequired > order.unitsFulfilled:
-                relevant_inventory_item_if_exists = [
-                    item for item in extractor.cargo.inventory
-                    if item.symbol == order.tradeSymbol
-                ]
-                if len(relevant_inventory_item_if_exists) == 1:
-                    deliver_cargo_req_body = DeliverCargoToContractReq(
-                        shipSymbol=extractor.symbol,
-                        tradeSymbol=order.tradeSymbol,
-                        units=min(
-                            [
-                                order.unitsRequired - order.unitsFulfilled,
-                                extractor.cargo, relevant_inventory_item_if_exists[0].units
-                            ]
-                        )
-                    )
-                    await client.contracts.deliver_cargo_to_contract(contract.id, deliver_cargo_req_body)
-
-    pass
+    await deposit_contract_resources(client, contract.id, extractor.symbol)
 
 
 if __name__ == "__main__":
-    asyncio.run(basic_automation_cycle())
+    asyncio.run(basic_automation_cycle(os.path.join("..", ".env")))

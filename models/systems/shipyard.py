@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -15,6 +15,6 @@ class ShipType(BaseModel):
 class Shipyard(BaseModel):
     symbol: str
     shipTypes: List[ShipType]
-    transactions: List[ShipyardTransaction]
-    ships: List[ShipyardShip]
+    transactions: Optional[List[ShipyardTransaction]] = None
+    ships: Optional[List[ShipyardShip]] = None
     modificationsFee: int

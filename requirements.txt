@@ -1,0 +1,6 @@
+httpx
+httpx-auth
+pydantic
+python-dotenv
+motor
+pymongo

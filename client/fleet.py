@@ -3,13 +3,16 @@ from typing import List, Optional
 from client.httpx_wrapping.internal_client import InternalClient
 from models.fleet.requests.jettison_cargo_req import JettisonCargoReq
 from models.fleet.requests.navigate_ship_req import NavigateShipReq
+from models.fleet.requests.purchase_cargo_req import PurchaseCargoReq
 from models.fleet.requests.purchase_ship_req import PurchaseShipReq
 from models.fleet.requests.refuel_req import RefuelReq
 from models.fleet.responses.dock_ship_response import DockShipResponse
 from models.fleet.responses.extract_resources_response import ExtractResourcesResponse
+from models.fleet.responses.jettison_cargo_response import JettisonCargoResponse
 from models.fleet.responses.navigate_ship_response import NavigateShipResponse
 from models.fleet.responses.negotiate_contract_response import NegotiateContractResponse
 from models.fleet.responses.orbit_ship_response import OrbitShipResponse
+from models.fleet.responses.purchase_cargo_response import PurchaseCargoResponse
 from models.fleet.responses.purchase_ship_response import PurchaseShipResponse
 from models.fleet.responses.refuel_response import RefuelResponse
 from models.fleet.ship import Ship, ShipNav, ShipCargo
@@ -51,8 +54,19 @@ class Fleet:
     async def extract_resources(self, ship_symbol: str) -> ExtractResourcesResponse:
         return await self._client.post(ExtractResourcesResponse, url=f"/my/ships/{ship_symbol}/extract")
 
-    async def jettison_cargo(self, ship_symbol: str, jettison_cargo_req: JettisonCargoReq) -> ShipCargo:
-        return await self._client.post(ShipCargo, url=f"my/ships/{ship_symbol}/jettison", req_data=jettison_cargo_req)
+    async def jettison_cargo(self, ship_symbol: str, jettison_cargo_req: JettisonCargoReq) -> JettisonCargoResponse:
+        return await self._client.post(
+            JettisonCargoResponse,
+            url=f"my/ships/{ship_symbol}/jettison",
+            req_data=jettison_cargo_req
+        )
 
     async def negotiate_contract(self, ship_symbol: str) -> NegotiateContractResponse:
         return await self._client.post(NegotiateContractResponse, url=f"my/ships/{ship_symbol}/negotiate/contract")
+
+    async def purchase_cargo(self, ship_symbol: str, purchase_cargo_req: PurchaseCargoReq):
+        return await self._client.post(
+            PurchaseCargoResponse,
+            url=f"/my/ships/{ship_symbol}/purchase",
+            req_data=purchase_cargo_req
+        )

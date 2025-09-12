@@ -5,7 +5,7 @@ import httpx
 
 
 class RateLimitTransport(httpx.AsyncHTTPTransport):
-    def __init__(self, max_per_second: float = 5, **kwargs) -> None:
+    def __init__(self, max_per_second: float = 2, **kwargs) -> None:
         """
         Async HTTP transport with rate limit.
 
@@ -29,7 +29,7 @@ class RateLimitTransport(httpx.AsyncHTTPTransport):
             until_now = next_start_time - now
             if until_now <= self.interval:
                 break
-            await asyncio.sleep(max(0, until_now - self.interval))
+            await asyncio.sleep(max(0.0, until_now - self.interval))
         self.next_start_time = max(self.next_start_time, now) + self.interval
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
