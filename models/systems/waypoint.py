@@ -36,13 +36,15 @@ class Waypoint(BaseModel, Hashable):
     systemSymbol: Optional[str] = None
     x: int
     y: int
-    orbitals: List[WaypointOrbital] = None
+    orbitals: Optional[List[WaypointOrbital]] = None
     orbits: Optional[str] = None
-    faction: WaypointFaction = None
-    traits: List[WaypointTrait] = None
-    modifiers: List[WaypointModifier] = None
-    chart: WaypointChart = None
-    isUnderConstruction: bool = None
+    faction: Optional[WaypointFaction] = None
+    traits: Optional[List[WaypointTrait]] = None
+    modifiers: Optional[List[WaypointModifier]] = None
+    chart: Optional[WaypointChart] = None
+    isUnderConstruction: Optional[bool] = None
+    internal_cluster_id: Optional[str] = None
+    internal_is_cluster_border: Optional[bool] = None
 
     def __hash__(self):
         return hash(self.symbol)

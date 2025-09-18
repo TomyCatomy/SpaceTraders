@@ -1,6 +1,7 @@
+python-dotenv
 httpx
 httpx-auth
 pydantic
-python-dotenv
+pydantic-settings
 motor
 pymongo
