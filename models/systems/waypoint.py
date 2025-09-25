@@ -43,8 +43,6 @@ class Waypoint(BaseModel, Hashable):
     modifiers: Optional[List[WaypointModifier]] = None
     chart: Optional[WaypointChart] = None
     isUnderConstruction: Optional[bool] = None
-    internal_cluster_id: Optional[str] = None
-    internal_is_cluster_border: Optional[bool] = None
 
     def __hash__(self):
         return hash(self.symbol)

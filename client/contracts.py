@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from client.httpx_wrapping.internal_client import InternalClient
 from models.contracts.contract import Contract
@@ -13,7 +13,7 @@ class Contracts:
     def __init__(self, client: InternalClient):
         self._client = client
 
-    async def get_contract_list(self, count: int=-1) -> List[Contract]:
+    async def get_contract_list(self, count: Optional[int] = None) -> List[Contract]:
         return await self._client.get_paginated_list(Contract, "/my/contracts", max_count=count)
 
     async def get_contract(self, contract_id: str):

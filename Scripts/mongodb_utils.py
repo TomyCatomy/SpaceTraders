@@ -1,4 +1,4 @@
-from typing import TypeVar, Any, Optional, Type, List
+from typing import TypeVar, Any, Optional, Type, List, Dict
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
@@ -22,17 +22,17 @@ async def database_setup(agent_symbol: str) -> None:
 async def create_database(agent_symbol: str) -> None:
     database = mongodb_client[agent_symbol]
     symbol_index_collections = [
-        database["WAYPOINTS"],
-        database["MARKETS"],
-        database["SHIPYARDS"],
-        database["SURVEYS"]
+        database["WAYPOINT"],
+        database["MARKET"],
+        database["SHIPYARD"],
+        database["SURVEY"]
     ]
     for collection in symbol_index_collections:
         await collection.create_indexes([IndexModel("symbol"), IndexModel("system")])
 
-    await database["WAYPOINTS"].create_indexes([IndexModel("_cluster_id"), IndexModel("_is_cluster_border")])
-    await database["SURVEYS"].create_indexes([IndexModel("signature"), IndexModel("expiration")])
-    await database["ROUTES"].create_indexes([IndexModel("route_id"), IndexModel("source"), IndexModel("dest"), IndexModel("system")])
+    await database["WAYPOINT"].create_indexes([IndexModel("_cluster_id"), IndexModel("_is_cluster_border")])
+    await database["SURVEY"].create_indexes([IndexModel("signature"), IndexModel("expiration")])
+    await database["ROUTE"].create_indexes([IndexModel("route_id"), IndexModel("source"), IndexModel("dest"), IndexModel("system")])
 
 
 
@@ -107,13 +107,11 @@ async def get_system_objects_by_filter(
         agent_symbol: str,
         collection_name: str,
         system_symbol: str,
-        filter_index_value: Any,
-        unique_index: str = "symbol",
+        mongo_filter: Dict[str, Any],
         object_count: Optional[int] = None
 ) -> Optional[List[T]]:
-    result = await mongodb_client[agent_symbol][collection_name].find(
-        filter={"system": system_symbol, unique_index: filter_index_value}
-    ).to_list(object_count)
+    mongo_filter["system"] = system_symbol
+    result = await mongodb_client[agent_symbol][collection_name].find(filter=mongo_filter).to_list(object_count)
     if not result:
         return None
 

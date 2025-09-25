@@ -15,8 +15,7 @@ from models.fleet.responses.orbit_ship_response import OrbitShipResponse
 from models.fleet.responses.purchase_cargo_response import PurchaseCargoResponse
 from models.fleet.responses.purchase_ship_response import PurchaseShipResponse
 from models.fleet.responses.refuel_response import RefuelResponse
-from models.fleet.ship import Ship, ShipNav, ShipCargo
-from models.systems.waypoint import Waypoint
+from models.fleet.ship import Ship
 
 
 class Fleet:
@@ -25,7 +24,7 @@ class Fleet:
     def __init__(self, client: InternalClient):
         self._client = client
 
-    async def get_ships(self, count=-1) -> List[Ship]:
+    async def get_ships(self, count: Optional[int] = None) -> List[Ship]:
         return await self._client.get_paginated_list(Ship, url="/my/ships", max_count=count)
 
     async def get_ship(self, ship_symbol: str) -> Ship:

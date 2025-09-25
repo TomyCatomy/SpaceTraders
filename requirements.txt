@@ -1,3 +1,4 @@
+tenacity
 python-dotenv
 httpx
 httpx-auth

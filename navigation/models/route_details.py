@@ -12,6 +12,8 @@ class RouteDetails(BaseModel):
     dest: Waypoint
     route_waypoints: List[str]
     total_distance: float
+    biggest_hop_allowed: float
+    biggest_hop_executed: float
 
     @computed_field
     @cached_property

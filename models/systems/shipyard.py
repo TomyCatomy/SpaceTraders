@@ -2,7 +2,6 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from models.fleet.ship import Ship
 from models.fleet.shipyard_transaction import ShipyardTransaction
 from models.systems.shipyard_ship import ShipyardShip
 

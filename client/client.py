@@ -1,6 +1,6 @@
 import random
 import string
-from typing import Optional, Tuple
+from typing import Tuple
 
 import httpx
 from httpx import AsyncClient, HTTPStatusError, Limits
@@ -9,6 +9,7 @@ from client.agent import Agent
 from client.contracts import Contracts
 from client.fleet import Fleet
 from client.httpx_wrapping.internal_client import InternalClient
+from client.mongo_wrapping.internal_mongo_client import InternalMongoClient
 from client.systems import Systems
 from models.agents.responses.register_agent_response import RegisterAgentResponse
 
@@ -17,30 +18,22 @@ API_BASE_URL: str = "https://api.spacetraders.io/v2"
 
 class Client:
     @staticmethod
-    async def get_client(
-            agent_auth_token: Optional[str] = None,
-            account_auth_token: Optional[str] = None,
-            faction: str = "COSMIC",
-            agent_symbol: Optional[str] = None
-    ) -> Tuple['Client', str]:
-        if agent_symbol is None:
-            agent_symbol = Client.random_string_generator(14)
-
+    async def get_client(agent_auth_token: str, mongodb_connection_string: str) -> Tuple['Client', str]:
         httpx_client: AsyncClient = httpx.AsyncClient(
             base_url=API_BASE_URL,
             limits=Limits(max_connections=10)
         )
-        internal_client: InternalClient = InternalClient(httpx_client)
+        mongo_client = InternalMongoClient.get_client(mongodb_connection_string)
+        internal_client: InternalClient = InternalClient(httpx_client, mongo_client)
         agent_property: Agent = Agent(internal_client)
         contracts_property: Contracts = Contracts(internal_client)
         fleet_property: Fleet = Fleet(internal_client)
         systems_property: Systems = Systems(internal_client)
         client = Client(internal_client, agent_property, contracts_property, fleet_property, systems_property)
-        if await client.is_valid_auth_token(agent_auth_token):
-            client._client.set_auth_token(agent_auth_token)
-        else:
-            agent_auth_token = await client.initialize_agent(agent_symbol, faction, account_auth_token)
+        if not await client.is_valid_auth_token(agent_auth_token):
+            raise Exception("Invalid auth token")
 
+        client._client.set_auth_token(agent_auth_token)
         return client, agent_auth_token
 
     def __init__(

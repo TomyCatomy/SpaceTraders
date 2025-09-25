@@ -10,7 +10,7 @@ async def get_system_waypoints(client: Client, system_symbol: str):
     return waypoints
 
 
-def find_intra_cluster_voyage_route(
+def find_navigation_route(
         waypoint_route: List[Waypoint],
         dest_waypoint: Waypoint,
         waypoints: List[Waypoint],
@@ -31,7 +31,7 @@ def find_intra_cluster_voyage_route(
 
         option_route = waypoint_route.copy()
         option_route.append(next_hop_option)
-        result_route = find_intra_cluster_voyage_route(
+        result_route = find_navigation_route(
             option_route,
             dest_waypoint,
             waypoints,
